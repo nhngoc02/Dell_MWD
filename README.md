@@ -1,1 +1,3 @@
-# Dell_MWD
+# Supply Chain Analytics for Dell: Predicting the number of missing, wronged or damaged (MWD) order units of different carriers
+
+In this project, I performed data analysis with R and created a machine learning interactive web application with RShiny. The goal was to generate a prediction model for the number of missing, wronged or damaged (MWD) order units of different Dell’s Carriers. The model was created based on six datasets provided from Dell that include the information on each order for the two quarters of Dell’s 2023 fiscal year: Q1P1, Q1P2, Q1P3, Q2P1, Q2P2_labeled and Q2P2_unlabeled. The model was further applied to understand the characteristics with which a carrier would have the MWD percentage exceeding the 1% threshold, which is the industry standard.
