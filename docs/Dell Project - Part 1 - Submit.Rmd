@@ -1,0 +1,487 @@
+---
+title: "Dell Project - Part 1"
+author: "Ngoc Nguyen"
+date: "2022-12-03"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+    toc_depth: 3
+    toc_float:
+      collapsed: true
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+```
+
+```{r, include=FALSE, message = FALSE, warning = FALSE}
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(reshape2)
+library(fastDummies)
+library(scales)
+library(car)
+library(readxl)
+library(stringr)
+library(sjmisc)
+```
+
+# Introduction
+
+This document details the process of creating and validating a model to predict the number of missing, wronged or damaged order units of different Dell's Carriers. There are six datasets provided from Dell that include the information on each order for the two quarters of Dell's 2023 fiscal year: Q1P1, Q1P2, Q1P3, Q2P1, Q2P2_labeled and Q2P2_unlabeled. These datasets include 10 columns:
+
+- Order Number: Number used for reference within company / with customer
+- `Carrier`: The transportation provider selected by company 
+- Service Level (`ServiceLevel`): The shipment mode type (LTL or Parcel)
+- Spam Facility Code (`SpamFacilityCode`): Indicate the fulfillment facility the order shipped from
+- Fiscal Week (`FiscalWeek`): Indicate the week the order was shipped
+- Fiscal Quarter (`FiscalQuarter`): Indicate the quarter the order was shipped
+- Total Order Quantity (`TotalOrderQuantity:`) The numbers of units (pieces) on the order / number units shipped
+- Total Orders (`TotalOrders`): Count of orders shipped
+- SR Diagnostic Tier 3: Root cause of why exchange order was created (damage or loss)
+- MWD % num (`MWD`):	Number of units that were damaged or lost on the order
+
+The datasets Q1P1, Q1P2, Q1P3, Q2P1 and Q2P2_label each has 614,172, 714,815, 397,472, 705,444 and 637,138 observations respectively. Since each observation represent a single order, the data can be further aggregated to represent a carrier with some specific characteristics.
+
+
+# Split datasets
+
+The train dataset includes Q1P1, Q1P2, Q1P3 and Q2P1. Q2P2_label will be the test dataset to compare the model predictions and the actual MWD values in this dataset.
+```{r, include=FALSE}
+Q1P1 <- read_excel("Q1P1.xlsx")
+Q1P2 <- read_excel("Q1P2.xlsx")
+Q1P3 <- read_excel("Q1P3.xlsx")
+Q2P1 <- read_excel("Q2P1.xlsx")
+Q2P2_unlabeled <- read_excel("Q2P2_Unlabeled.xlsx")
+Q2P2_labeled <- read_excel("Q2P2_Labeled.xlsx")
+```
+
+```{r, include=FALSE}
+train <- rbind(Q1P1, Q1P2, Q1P3, Q2P1)
+test <- Q2P2_labeled
+```
+
+```{r, include=FALSE}
+colnames(train) <- c("OrderNum", "Carrier", "ServiceLevel", "SpamFacilityCode", "FiscalWeek", "FiscalQuarter", "TotalOrderQuantity", "TotalOrders", "SR_Diag", "MWD")
+```
+
+```{r, include=FALSE}
+colnames(test) <- c("OrderNum", "Carrier", "ServiceLevel", "SpamFacilityCode", "FiscalWeek", "FiscalQuarter", "TotalOrderQuantity", "TotalOrders", "SR_Diag", "MWD")
+```
+
+# Clean data & add features
+
+1. Clean the N/A values in MWD
+
+In the MWD column, the N/A values indicate no missing, wrong, or damaged orders. Therefore, for better calculation, N/A values in `MWD` will be converted into 0. Additionally, this column will be treated as a numeric variable.
+
+```{r, include=FALSE}
+train[train$MWD == "N/A", "MWD"] <- "0"
+train$MWD <- as.integer(train$MWD)
+
+test[test$MWD == "N/A", "MWD"] <- "0"
+test$MWD <- as.integer(test$MWD)
+```
+
+2. Clean problematic MWD values
+
+There are 159 observations in the train dataset and 34 observations in the test dataset with a higher number of MWD than the number of TotalOrderQuantity. This is not reasonable, because the number of missing, wrong, or damaged units in an order can not be larger than the number of total quantity in that order. Therefore, these MWD values will be replaced by the TotalOrderQuantity (which is the largest number of lost/damaged units possible in an order).
+
+```{r, include=FALSE}
+nrow(train[train$TotalOrderQuantity < train$MWD, ])
+```
+
+```{r, include=FALSE}
+train[, "MWD"] <- ifelse(train$TotalOrderQuantity < train$MWD, train$TotalOrderQuantity, train$MWD)
+```
+
+```{r, include=FALSE}
+nrow(train[train$TotalOrderQuantity < train$MWD, ])
+```
+
+```{r, include=FALSE}
+nrow(test[test$TotalOrderQuantity < test$MWD, ])
+```
+
+```{r, include=FALSE}
+test[, "MWD"] <- ifelse(test$TotalOrderQuantity < test$MWD, test$TotalOrderQuantity, test$MWD)
+```
+
+```{r, include=FALSE}
+nrow(test[test$TotalOrderQuantity < test$MWD, ])
+```
+
+3. Turn all categorical variables into factors
+
+Columns such as `Carrier`, `Service Level`, `FiscalWeek` and `SpamFacilityCode` in both train and test datasets will be converted from character type into factor type. The levels in Carrier column will also be rearranged.
+
+```{r, include=FALSE}
+unique(train$Carrier)
+```
+
+
+```{r, include=FALSE}
+train$Carrier <- factor(train$Carrier, levels = c("Carrier 1", "Carrier 2", "Carrier 3", "Carrier 4", "Carrier 5", "Carrier 6", "Carrier 7", "Carrier 8", "Carrier 9", "Carrier 10", "Carrier 11", "Carrier 12", "Carrier 13", "Carrier 14", "Carrier 15", "Carrier 16", "Carrier 17", "Carrier 18", "Carrier 19", "Carrier 20", "Carrier 21", "Carrier 22", "Carrier 23"))
+train$ServiceLevel <- as.factor(train$ServiceLevel)
+train$FiscalWeek <- as.factor(train$FiscalWeek)
+train$SpamFacilityCode <- as.factor(train$SpamFacilityCode)
+```
+
+```{r, include=FALSE}
+test$Carrier <- factor(test$Carrier, levels = c("Carrier 1", "Carrier 2", "Carrier 3", "Carrier 4", "Carrier 5", "Carrier 6", "Carrier 7", "Carrier 8", "Carrier 9", "Carrier 10", "Carrier 11", "Carrier 12", "Carrier 13", "Carrier 14", "Carrier 15", "Carrier 16", "Carrier 17", "Carrier 18", "Carrier 19", "Carrier 20", "Carrier 21", "Carrier 22", "Carrier 23"))
+test$ServiceLevel <- as.factor(test$ServiceLevel)
+test$FiscalWeek <- as.factor(test$FiscalWeek)
+test$SpamFacilityCode <- as.factor(test$SpamFacilityCode)
+```
+
+4. Create the Quarter column
+
+The `Quarter` column represents the fiscal quarter of each order, which is created by extracting the last two characters of Fiscal Quarter. This variable will not be included in the model, but is used to create the `WeekInt` column. `WeekInt` is the week number in a quarter, which provides information about the seasonality, the difference between MWD at the beginning and at the end of each quarter.
+
+```{r, include=FALSE}
+train$Quarter <- str_sub(train$FiscalQuarter, start= -2)
+test$Quarter <- str_sub(test$FiscalQuarter, start= -2)
+```
+
+# Aggregrate data
+
+Since both the train and test dataset contain observations for individual orders, these data can be further aggregated to generate the model more easily. In this case, both datasets will be grouped by `Fiscal Week`, `Carrier`, `Service Level`, `Spam Facility` and `Quarter`.
+
+```{r, include=FALSE}
+train_group <- train %>% 
+  group_by(FiscalWeek, Carrier, ServiceLevel, SpamFacilityCode, Quarter) %>% 
+  summarise(TotalOrderQuantity = sum(TotalOrderQuantity), TotalOrders = sum(TotalOrders), MWD = sum(MWD))  
+```
+
+```{r, include=FALSE}
+test_group <- test %>% 
+  group_by(FiscalWeek, Carrier, ServiceLevel, SpamFacilityCode, Quarter) %>% 
+  summarise(TotalOrderQuantity = sum(TotalOrderQuantity), TotalOrders = sum(TotalOrders), MWD = sum(MWD))  
+```
+
+After data aggregation, the WeekInt will be created according to the Quarter. To reiterate, WeekInt represents the week number in one quarter. There are two quarters in the provided datasets: quarter 1 and quarter 2. The first week of quarter 2 is week 14. Thus, `WeekInt` of week 1 to week 13 will have the same week values. Meanwhile, `WeekInt` of week 14 and above will be calucuated by subtracting 13 from the week value. For example, week 14 is the first week of quarter 2, so its `WeekInt` value is 1.
+```{r, include=FALSE}
+train_group$Week <- str_sub(train_group$FiscalWeek,-2) 
+test_group$Week <- str_sub(test_group$FiscalWeek,-2) 
+train_group$WeekInt <- as.integer(train_group$Week)
+train_group$WeekInt <-  ifelse(train_group$Quarter == "Q2", train_group$WeekInt - 13, train_group$WeekInt)
+test_group$WeekInt <- (as.integer(test_group$Week) - 13)
+```
+
+# Correlation - Bivariate Analysis
+
+## MWD & Carrier
+
+The boxplot shows that the mean MWD for every carrier is 0, except for carrier 11. The two largest numbers of missing, wronged or damaged order units are from carrier 5 and carrier 11. Table 1 shows the correlation for each carrier with MWD. Carriers 12 and 5 have the strongest positive correlation with MWD at .09 and .08 respectively. In contrast, carrier 16 is noticeably negatively correlated with MWD.
+
+```{r, echo=FALSE}
+ggplot(train_group, aes(Carrier, MWD)) +
+  geom_boxplot(alpha = 0.3) +
+  coord_flip() + 
+  labs(title = "Carrier & MWD") +
+  theme_bw() +
+  scale_colour_brewer(type = "seq", palette = "Spectral")
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+MWD_Carrier <- train_group %>% 
+  select(MWD, Carrier)
+
+MWD_Carrier_dummys <- dummy_cols(MWD_Carrier, "Carrier")
+
+cor_matrix <- cor(MWD_Carrier_dummys[,c(4,6:28)])
+cor_matrix <- round(cor_matrix, 2)
+
+get_upper_tri<-function(cor_matrix) {
+  cor_matrix[lower.tri(cor_matrix)] <- NA
+  return(cor_matrix) }
+
+
+lower_tri <- get_upper_tri(cor_matrix)
+melted_cormat <- melt(lower_tri, na.rm = TRUE)
+
+MWD_corr <- melted_cormat %>%
+  filter(Var1 == "MWD") %>%
+  filter(Var2 != "MWD")
+
+
+MWD_corr <- rename(MWD_corr, DependentVar = Var1, IndependentVar = Var2, Correlation = value)
+
+
+MWD_corr %>%
+  arrange(desc(Correlation)) %>%
+  kbl(caption = "Table 1: Carrier Correlations with MWD") %>%
+  kable_classic_2(position = "center") %>%
+  column_spec(1, width = "10em")
+```
+
+## MWD & Spam Facility Code
+
+The boxplot shows that the mean MWD for every SpamFacilityCode is 0. The largest number of missing, wronged or damaged order units is from SpamFacilityCode 3NV. Table 2 shows the correlation for each SpamFacilityCode with MWD. SpamFacilityCode SCA has the strongest positive correlation with MWD at .07. In contrast, SpamFacilityCode 3EP is noticeably negatively correlated with MWD.
+
+
+```{r, echo=FALSE}
+ggplot(train_group, aes(SpamFacilityCode, MWD)) +
+  geom_boxplot(alpha = 0.3)+
+  coord_flip()+
+  labs(title = "MWD & Spam Facility Code") +
+  theme_bw()
+```
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+MWD_SpamFacilityCode <- train_group %>% 
+  select(MWD, SpamFacilityCode)
+
+MWD_SpamFacilityCode_dummys <- dummy_cols(MWD_SpamFacilityCode, "SpamFacilityCode")
+
+cor_matrix <- cor(MWD_SpamFacilityCode_dummys[,c(4,6:26)])
+cor_matrix <- round(cor_matrix, 2)
+
+get_upper_tri<-function(cor_matrix) {
+  cor_matrix[lower.tri(cor_matrix)] <- NA
+  return(cor_matrix) }
+
+
+lower_tri <- get_upper_tri(cor_matrix)
+melted_cormat <- melt(lower_tri, na.rm = TRUE)
+
+MWD_corr <- melted_cormat %>%
+  filter(Var1 == "MWD") %>%
+  filter(Var2 != "MWD")
+
+
+MWD_corr <- rename(MWD_corr, DependentVar = Var1, IndependentVar = Var2, Correlation = value)
+
+
+MWD_corr %>%
+  arrange(desc(Correlation)) %>%
+  kbl(caption = "Table 2: Spam Facility Code Correlations with MWD") %>%
+  kable_classic_2(position = "center") %>%
+  column_spec(1, width = "10em")
+```
+
+
+## MWD & Total Order Quantity
+
+```{r, include=FALSE}
+cor(train_group$MWD, train_group$TotalOrderQuantity)
+```
+
+The scatter plot of Total Order Quantity relative to MWD confirms that there is a positive association between the two variables. In particular, the correlation is 0.36. In general, the higher the total order quantity a carrier has, the higher the number of missing, wrong or damaged order units. However, the changes in MWD appears to be larger for total order quantity below 50,000. One interesting point stands out: One carrier has the total order quantity of less than 50,000 but has an MWD value of more than 1,500. Interestingly, the correlation MWD and Total Order Quantity seem to be different for different Service Level.
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(train_group, aes(TotalOrderQuantity, MWD, color = ServiceLevel)) +
+  geom_point(alpha = 0.4) +
+  # geom_smooth(method = "lm", se = F) +
+  labs(title = "MWD & Total Order Quantity") +
+  theme_bw()
+```
+
+## MWD & Total Orders
+
+```{r, include=FALSE}
+cor(train_group$MWD, train_group$TotalOrders)
+```
+
+The scatter plot of Total Orders relative to MWD confirms that there is a positive association between the two variables. In particular, the correlation is 0.25. In general, the higher the total orders a carrier has, the higher the number of missing, wrong or damaged order units. However, the changes in MWD appears to be larger for total orders above 50,000. One interesting point stands out: One carrier has the total orders of less than 2,000 but has an MWD value of more than 1,500.
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(train_group, aes(TotalOrders, MWD)) +
+  geom_point(alpha = 0.25) +
+  geom_smooth(method = "lm", se = F) +
+  labs(title = "MWD & Total Orders") +
+  theme_bw()
+```
+
+
+## MWD & Service Level
+
+The boxplot shows that the mean MWD for every service level is 0. The largest number of missing, wronged or damaged order units is from service level Parcel Ground. This service level also has a wider MWD distribution range. Table 3 shows the correlation for each service level with MWD. Service level Parcel Ground has the strongest positive correlation with MWD at .12. In contrast, service level Parcel Day 2 and Parcel Day 3 are noticeably negatively correlated with MWD.
+
+```{r, echo=FALSE}
+ggplot(train_group, aes(ServiceLevel, MWD, fill = ServiceLevel)) +
+  geom_boxplot(alpha = 0.3) +
+  coord_flip() +
+  theme_bw() +
+  scale_colour_brewer(type = "seq", palette = "Spectral")
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+MWD_SL <- train_group %>% 
+  select(MWD, ServiceLevel)
+
+MWD_SL_dummys <- dummy_cols(MWD_SL, "ServiceLevel")
+
+cor_matrix <- cor(MWD_SL_dummys[,c(4,6:14)])
+cor_matrix <- round(cor_matrix, 2)
+
+get_upper_tri<-function(cor_matrix) {
+  cor_matrix[lower.tri(cor_matrix)] <- NA
+  return(cor_matrix) }
+
+
+lower_tri <- get_upper_tri(cor_matrix)
+melted_cormat <- melt(lower_tri, na.rm = TRUE)
+
+MWD_corr <- melted_cormat %>%
+  filter(Var1 == "MWD") %>%
+  filter(Var2 != "MWD")
+
+
+MWD_corr <- rename(MWD_corr, DependentVar = Var1, IndependentVar = Var2, Correlation = value)
+
+
+MWD_corr %>%
+  arrange(desc(Correlation)) %>%
+  kbl(caption = "Table 3: Service Level Correlations with MWD") %>%
+  kable_classic_2(position = "center") %>%
+  column_spec(1, width = "10em")
+```
+
+## MWD & WeekInt
+
+```{r, include=FALSE, message=FALSE}
+cor(train_group$MWD, train_group$WeekInt)
+```
+
+The plot of WeekInt relative to MWD shows that the numbers of missing, wrong or damaged order units remain relatively constant as WeekInt increases. In particular, the correlation between two variables is -0.02. The highest numbers of missing, wronged or damaged units are between WeekInt 1 to 5. 
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(train_group, aes(WeekInt, MWD)) +
+  geom_point(alpha = 0.25) +
+  geom_smooth(method = "lm", se = F) +
+  labs(title = "MWD & WeekInt") +
+  theme_bw()
+```
+
+
+## Total Order Quantity & Service Level
+
+According to the boxplot, Parcel Home, Parcel Ground, Parcel 1 day and LTL have higher TotalOrderQuantity means than other service levels. Based on table 4, service levels Parcel Ground and LTL have the strongest positive correlation with TotalOrderQuantity at .26 and .11. In contrast, service levels LTL Priority, Parcel Home, Parcel 1, Parcel 3 Day and Parcel 2 day are noticeably negatively correlated with TotalOrderQuantity. Since there are different correlation between TotalOrderQuantity and each service level, including the interaction between them in the model possibly give more insights.
+
+```{r, echo=FALSE}
+ggplot(train_group, aes(ServiceLevel, TotalOrderQuantity, fill = ServiceLevel)) +
+  geom_boxplot(alpha = 0.3) +
+  coord_flip() +
+  labs(title = "Total Order Quantity & Service Level") +
+  theme_bw() +
+  scale_colour_brewer(type = "seq", palette = "Spectral")
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+TOQ_SL <- train_group %>% 
+  select(TotalOrderQuantity, ServiceLevel)
+
+TOQ_SL_dummys <- dummy_cols(TOQ_SL, "ServiceLevel")
+
+cor_matrix <- cor(TOQ_SL_dummys[,c(4,6:14)])
+cor_matrix <- round(cor_matrix, 2)
+
+get_upper_tri<-function(cor_matrix) {
+  cor_matrix[lower.tri(cor_matrix)] <- NA
+  return(cor_matrix) }
+
+
+lower_tri <- get_upper_tri(cor_matrix)
+melted_cormat <- melt(lower_tri, na.rm = TRUE)
+
+MWD_corr <- melted_cormat %>%
+  filter(Var1 == "TotalOrderQuantity") %>%
+  filter(Var2 != "TotalOrderQuantity")
+
+
+MWD_corr <- rename(MWD_corr, DependentVar = Var1, IndependentVar = Var2, Correlation = value)
+
+
+MWD_corr %>%
+  arrange(desc(Correlation)) %>%
+  kbl(caption = "Table 4: Service Level Correlations with TotalOrderQuantity") %>%
+  kable_classic_2(position = "center") %>%
+  column_spec(1, width = "10em")
+```
+
+
+# MWD prediction model
+
+Based on the information about the correlation between MWD and other variables, the MWD prediction model will be built based on `Carrier`, `SpamFacilityCode`, `TotalOrderQuantity`, `TotalOrders`, `WeekInt` and the interaction between `TotalOrderQuantity` and `ServiceLevel` (without including the main effect of `ServiceLevel` to avoid multicollinearity). 
+
+- The formula passed in the fitting linear model function: `MWD ~ Carrier + SpamFacilityCode + TotalOrderQuantity + TotalOrders + TotalOrderQuantity:ServiceLevel + WeekInt + 0`
+
+The following are the summary and four diagnostic plots of the model:
+```{r, echo=FALSE, warning=FALSE}
+model <- lm(MWD ~ Carrier + SpamFacilityCode + TotalOrderQuantity + TotalOrders + TotalOrderQuantity:ServiceLevel + WeekInt + 0, data = train_group)
+summary(model)
+plot(model)
+```
+
+
+## Train and validate the multi-variable linear regression model 
+
+In order to check if the model meets all Linear Regression Assumptions, the summary of the model, its diagnostic plots and GVIF values come into handy. 
+
+1. **Assumption 1:** There exists a linear relationship between the Outcome and the Predictor variables
+
+Based on the plots demonstrating the correlation between MWD and other predictors in the Correlation - Bivariate Analysis part, there is:
+
+- A positive linear relationship between MWD and TotalOrderQuantity.
+- A positive linear relationship between MWD and TotalOrders.
+- A minimal negative linear relationship between MWD and WeekInt.
+
+Thus, there exists a linear relationship between MWD and other numeric predictors included in the model.
+
+2. **Assumption 2:** The error terms are normally distributed with a mean of 0 
+
+- According to the Residual Stats in the model summary, the error terms are not perfectly normally distributed. Although the median is close to 0, the max is much further away from the median than the min (max = 1407.4 and min = -151.9). Additionally, the first quartile is further away from the median than the third quartile (1Q = -7.27 and 3Q = 2.71). 
+- On the other hand, the Normal QQ plot shows that the model residuals the residuals are very closely aligned with a normal distribution between -2 to 2 standard deviation. Because the majority of points between -2 to 2 standard deviation lie on the dashed line. However, at other quartiles, the residuals deviate from normality with positive larger theoretical quantiles deviating more.
+
+
+3. **Assumption 3:** The variance of the error terms is not related predicted outcomes (homoskedasticity). If this assumption is not met, the model exhibits heteroskedasticity. (residual vs fitted plot & scale-location plot)
+
+The Residual vs Fitted plot and the Scale-Location plot show randomness in the residual distribution and the mean is close to 0. However, some outliers that make the residual range at some parts larger than the other. Additionally, there is a slight curve pattern in the Scale-Location plot, signaling heteroskedasticity. Therefore, the model does not have perfect homoskedasticity. Although heteroskedasticity is a concern, it is not to great extent. Because there are a few outliers that affect the variance of the error terms. 
+
+4. **Assumption 4:** No multicollinearity between the predictor variables.
+
+Running the vif() function on the model returns gvif values all below 4. Thus, multicollinearity is not of concern in this model.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+vif(model)
+```
+
+Note: The Residuals vs Leverage does not plot the rows 866 and 2722 in the train dataset because they are of leverage one. The observations in rows 1 and 2614 fall outside the Cook's distance. All of these points represent outliers that are overinfluential in the model. However, I decided not to remove them to avoid making bias in the prediction model. Because the data is already aggregated, changing one value would affect a thousand of actual observations.
+
+```{r, include=FALSE}
+tibble(train_group[c(1, 866, 2722, 2614), ])
+```
+
+## Generate the prediction for the test dataset & calculate regression metrics
+
+The two metrics used to validate model performance in this report are R-Squared and Root Mean Square of Errors (RMSE). These metrics will be calculated on both the train and test datasets.
+
+```{r, echo=FALSE}
+test_group$predict <- predict(model, newdata = test_group)
+test_group$residuals <- test_group$MWD - test_group$predict
+test_R2 <- round(1 - (sum((test_group$MWD-test_group$predict)^2)/sum((test_group$MWD-mean(test_group$MWD))^2)), 4)
+
+test_RMSE <- round(sqrt(mean((test_group$residuals)^2)), 3)
+
+train_R2 <- round(0.1886674, 4)
+train_RMSE <- round(49.46481, 3)
+output <- data.frame(train_R2, 
+                    train_RMSE,
+                    test_R2, 
+                    test_RMSE)
+output %>% 
+  kbl() %>%
+  kable_classic_2(position = "center") %>%
+  column_spec(1, width = "10em")
+```
+
+
+- The train_R2 of 0.1887 means that the six predictors included in the model explained approximately 18.87% of the variance in the number of missing, wrong, or damaged units in the train dataset. The train_RMSE of 49.465 represents the average distance of 49.465 between the predicted values from the model and the actual values in the train dataset. Similarly, the test_R2 of 0.4115 means that the six predictors included in the model explained approximately 41.15% of the variance in the number of missing/ damaged order units in the test dataset. The test_RMSE of 24.508 represents the average distance of 24.508 between the predicted values from the model and the actual values in the test dataset.
+- The model is valid if only the R-Squared metric from the test dataset is not significantly lower than that from the train dataset. In this case, the R-Squared in the test dataset is higher than in the test dataset. Therefore, the model is valid.
